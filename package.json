@@ -1,0 +1,14 @@
+{
+  "name": "parallax",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Principal-protected structured note protocol for X Layer",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "hardhat": "^2.29.0"
+  }
+}

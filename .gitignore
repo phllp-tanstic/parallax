@@ -1,0 +1,21 @@
+# Node
+node_modules/
+npm-debug.log*
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+.pytest_cache/
+
+# Secrets
+.env
+.env.local
+
+# Solidity / Hardhat build output
+artifacts/
+cache/
+
+# Editor / OS
+.DS_Store
