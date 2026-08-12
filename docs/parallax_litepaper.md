@@ -442,6 +442,23 @@ Ranked by severity, most important first:
 
 ## 17. Launch-Readiness Checklist (Post-Hackathon → Production)
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 - [ ] Item 1 above (eligibility) receives direct confirmation, not just strong inference
 - [ ] Item 2 above (slippage model) corrected with proper V3 mechanics
 - [ ] Item 3 above (oracle staleness) implemented and tested per §10.9
