@@ -46,5 +46,28 @@ def semi_covariance_matrix(
     Returns:
         Semi-covariance matrix of shape ``(N, N)``, symmetric and PSD, in the
         same asset order as the columns of ``window_returns``.
+
+        Expressed in the same periodicity as ``window_returns`` — the raw
+        estimator, not annualized. Scaling to an annual basis is the caller's
+        responsibility, so that this function stays a single, testable
+        definition of the §9.2 estimator.
     """
-    raise NotImplementedError("see docs/parallax_litepaper.md §9.2")
+    if window_returns.shape[0] == 0:
+        raise ValueError(
+            "semi_covariance_matrix requires at least one observation; "
+            "got empty window_returns"
+        )
+
+    downside = np.minimum(window_returns - target, 0.0)
+    n_observations = window_returns.shape[0]
+    result = downside.T @ downside / n_observations
+
+    # NOTE: downside @ downside.T (wrong transposition) also produces a
+    # symmetric PSD matrix and would pass the assertion below when T==N.
+    # The shape check in Test 4 of test_semi_covariance.py is the primary
+    # guard against that transposition bug.
+    assert np.allclose(result, result.T, atol=1e-10), (
+        "semi-covariance matrix must be symmetric"
+    )
+
+    return result

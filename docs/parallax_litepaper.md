@@ -431,7 +431,7 @@ Confirmed via direct on-chain calls (not assumed from documentation):
 
 Ranked by severity, most important first:
 
-1. **xStocks smart-contract eligibility — conditionally cleared, not fully resolved.** No direct confirmation from X Layer's dev channel as of this document. Proceeding on strong secondary evidence (issuer/exchange documentation indicating KYC gates mint/redeem, not transfer; direct on-chain confirmation of a DEX pool holding the token) plus the decision to acquire xStocks via DEX swap rather than issuer mint/redeem. **This channel must stay open and be checked against before mainnet deployment beyond hackathon scope.**
+1. **xStocks smart-contract eligibility — CLEARED via primary source documentation.** The official xStocks documentation at docs.xstocks.fi/docs states explicitly: *"Permissionless: xStocks can be held, transferred, integrated and traded across platforms and wallets without platform dependency or technical transfer restrictions."* The How xStocks Work page further confirms secondary market trading *"does not require direct interaction with the issuer and follows standard exchange or DeFi trading mechanics."* The Introduction explicitly describes xStocks as *"integrable into structured products"* — Parallax's exact use case. KYC is required only for primary market issuance and redemption, which Parallax does not use. Parallax acquires xStocks via DEX swap (secondary market) and holds them in a vault contract (DeFi composability), both explicitly permissionless per issuer documentation. OKX support's inability to confirm was a support-tier knowledge gap, not evidence of a restriction. This gate is closed. Sources: https://docs.xstocks.fi/docs (Permissionless characteristic), https://docs.xstocks.fi/docs/how-xstocks-work (Secondary Market section). No direct confirmation from X Layer's dev channel as of this document. Proceeding on strong secondary evidence (issuer/exchange documentation indicating KYC gates mint/redeem, not transfer; direct on-chain confirmation of a DEX pool holding the token) plus the decision to acquire xStocks via DEX swap rather than issuer mint/redeem. **This channel must stay open and be checked against before mainnet deployment beyond hackathon scope.**
 2. **Transaction cost / slippage model needs correction.** Current figures were derived using a V2-style constant-product approximation against a pool subsequently confirmed to be Uniswap V3. Directionally useful, not precisely validated. Needs a proper V3 tick/liquidity-based slippage model before any cost claim is stated with confidence.
 3. **Oracle staleness protection is specified (§9.8, §10.9) but not yet implemented in code.** This is a real gap between design and build status, not a resolved item — flagged explicitly rather than assumed complete because it's described in the architecture.
 4. **Early-exit pricing formula is undefined for MVP** beyond "simple, disclosed penalty" — the exact formula needs to be specified before frontend work can proceed.
@@ -441,23 +441,6 @@ Ranked by severity, most important first:
 ---
 
 ## 17. Launch-Readiness Checklist (Post-Hackathon → Production)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 - [ ] Item 1 above (eligibility) receives direct confirmation, not just strong inference
 - [ ] Item 2 above (slippage model) corrected with proper V3 mechanics
