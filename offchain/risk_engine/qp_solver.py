@@ -6,6 +6,7 @@ docs/parallax_litepaper.md §9.3, with the infeasibility fallback from §9.3.1.
 
 from typing import Sequence
 
+import cvxpy as cp
 import numpy as np
 
 
@@ -88,5 +89,63 @@ def min_variance_weights(
     Raises:
         ValueError: If any ticker in ``asset_order`` has no corresponding entry
             in ``asset_classes``.
+        RuntimeError: If both the primary and fallback solves fail (degenerate
+            universe — e.g. n=0, or concentration cap alone is infeasible).
     """
-    raise NotImplementedError("see docs/parallax_litepaper.md §9.3")
+    asset_order = list(asset_order)
+    n = len(asset_order)
+
+    # --- Validation: every ticker must have an explicit class mapping ----------
+    missing = [t for t in asset_order if t not in asset_classes]
+    if missing:
+        raise ValueError(
+            f"Asset(s) in asset_order have no entry in asset_classes: {missing}. "
+            "asset_classes must be supplied by the caller from configuration; "
+            "the solver never infers or defaults class membership (§9.3)."
+        )
+
+    # --- Build per-class index masks ------------------------------------------
+    crypto_idx = [i for i, t in enumerate(asset_order) if asset_classes[t] == "crypto"]
+    equity_idx = [i for i, t in enumerate(asset_order) if asset_classes[t] == "equity"]
+
+    # --- Decision variable ----------------------------------------------------
+    w = cp.Variable(n)
+
+    # --- Objective: minimise portfolio downside variance ----------------------
+    objective = cp.Minimize(cp.quad_form(w, cov_matrix))
+
+    # --- Shared constraints (always present, including in fallback) -----------
+    shared_constraints = [
+        cp.sum(w) == 1,          # fully invested
+        w >= 0,                  # long-only (§9.3 — no shorting, ever)
+        w <= max_concentration,  # per-asset concentration cap
+    ]
+
+    # --- Floor constraints (dropped entirely on infeasibility, §9.3.1) -------
+    floor_constraints = []
+    if crypto_idx:
+        floor_constraints.append(cp.sum(w[crypto_idx]) >= crypto_floor)
+    if equity_idx:
+        floor_constraints.append(cp.sum(w[equity_idx]) >= equity_floor)
+
+    # --- Attempt primary solve (floors active) --------------------------------
+    problem = cp.Problem(objective, shared_constraints + floor_constraints)
+    problem.solve(solver=cp.CLARABEL, warm_start=False)
+
+    if problem.status in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE) and w.value is not None:
+        return np.asarray(w.value, dtype=float)
+
+    # --- §9.3.1 infeasibility fallback: drop floors entirely, keep cap only --
+    fallback = cp.Problem(objective, shared_constraints)
+    fallback.solve(solver=cp.CLARABEL, warm_start=False)
+
+    if fallback.status in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE) and w.value is not None:
+        return np.asarray(w.value, dtype=float)
+
+    # If even the cap-only problem fails, the universe itself is degenerate.
+    # Raise explicitly — caller must handle, never return NaN.
+    raise RuntimeError(
+        f"QP solver failed on both primary and fallback problems. "
+        f"Primary status: {problem.status}. Fallback status: {fallback.status}. "
+        "Universe may be degenerate (n=0, concentration cap alone infeasible, etc.)."
+    )
