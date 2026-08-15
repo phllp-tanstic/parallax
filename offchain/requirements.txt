@@ -2,3 +2,4 @@ cvxpy
 numpy
 pandas
 pytest
+pyyaml

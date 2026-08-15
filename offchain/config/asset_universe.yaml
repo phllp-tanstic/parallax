@@ -1,0 +1,55 @@
+# Parallax MVP asset universe (docs/parallax_litepaper.md §13, §9.3).
+#
+# §13 scope: "2–3 xStocks + 1–2 crypto assets in the risk-leg universe."
+# This file is the single source of truth for asset_order / asset_classes
+# consumed by risk_engine.qp_solver.min_variance_weights() — per §9.3, class
+# membership must be caller-supplied from configuration, never hardcoded
+# inside the risk-engine module.
+#
+# contract_address: null means NOT YET VERIFIED ON-CHAIN. Do not fill in a
+# placeholder or guessed address — an unverified address here is worse than
+# an explicit gap, because it would silently pass validation and route real
+# funds. Confirm on-chain (asset()/totalSupply() or equivalent, per the
+# wNVDAx precedent in §9.10) before setting a non-null value.
+
+assets:
+  - ticker: BTC-USD
+    class: crypto
+    contract_address: "0xb7c00000bcdeef966b20b3d884b98e64d2b06b4f"
+
+  - ticker: ETH-USD
+    class: crypto
+    contract_address: "0xe7b000003a45145decf8a28fc755ad5ec5ea025a"
+
+  - ticker: wNVDAx
+    class: equity
+    # Verified on-chain per §9.10: asset(), totalAssets()/totalSupply(),
+    # convertToAssets(1e18) all confirmed ERC-4626-style wrapper behavior.
+    contract_address: "0xa8ddb5cd96b5222afe198316e9a57caa642850d5"
+
+  - ticker: wTSLAx
+    class: equity
+    # FULLY VERIFIED per §9.10 standard, 2026-08-15, via direct on-chain
+    # calls (scripts/verify_wrapper.js against xlayerrpc.okx.com):
+    #   name(): "Wrapped Tesla xStock", symbol(): "wTSLAx"
+    #   asset(): 0x8aD3c73F833d3F9A523aB01476625F269aEB7Cf0
+    #     (matches TSLAx base token address independently confirmed via
+    #     Etherscan — same address cross-chain, consistent with the
+    #     deterministic-deployment pattern seen across other xStocks assets)
+    #   totalAssets() == totalSupply() == 688952071927489864782 (exchange
+    #     rate exactly 1.0 — no corporate action has hit this wrapper since
+    #     deployment yet; not a red flag, but re-verify before mainnet since
+    #     a wrapper that's never shown divergence from 1.0 is a weaker
+    #     confirmation than one with proven accrual, cf. wSPYx below)
+    contract_address: "0xc3fdbe3a68ee5de461d30415a8165cf9aefe1171
+
+  - ticker: wSPYx
+    class: equity
+    # FULLY VERIFIED per §9.10 standard, 2026-08-15, via direct on-chain
+    # calls (scripts/verify_wrapper.js against xlayerrpc.okx.com):
+    #   name(): "Wrapped SP500 xStock", symbol(): "wSPYx"
+    #   asset(): 0x90A2a4c76b5D8c0bc892A69EA28Aa775a8f2dD48
+    #   convertToAssets(1e18) = 1005714560286254000 -> exchange rate
+    #     ~1.005714, confirming live rebasing-wrapper accrual, same
+    #     qualitative pattern as wNVDAx (~1.0009)
+    contract_address: "0xe7e553cd128f0011777323a0b44a7b96ea1cb540"
