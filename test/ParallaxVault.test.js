@@ -12,7 +12,7 @@ describe("ParallaxVault", function () {
   const DEFAULT_PENALTY_BPS = 500;
 
   async function deployVaultFixture() {
-    const [owner, riskServiceSigner, alice, bob] = await ethers.getSigners();
+    const [owner, alice, bob] = await ethers.getSigners();
 
     const MockERC20 = await ethers.getContractFactory("MockERC20");
     const usdc = await MockERC20.deploy("USD Coin", "USDC", USDC_DECIMALS);
@@ -28,7 +28,6 @@ describe("ParallaxVault", function () {
       await usdc.getAddress(),
       await safeLegManager.getAddress(),
       await riskLegManager.getAddress(),
-      riskServiceSigner.address,
       DEFAULT_DEPOSIT_CAP,
       DEFAULT_RATE_BPS,
       DEFAULT_MIN_DEPOSIT,
@@ -40,23 +39,21 @@ describe("ParallaxVault", function () {
       await usdc.connect(user).approve(await vault.getAddress(), ethers.MaxUint256);
     }
 
-    return { vault, usdc, safeLegManager, riskLegManager, owner, riskServiceSigner, alice, bob };
+    return { vault, usdc, safeLegManager, riskLegManager, owner, alice, bob };
   }
 
   describe("Deployment", function () {
     it("sets constructor parameters correctly", async function () {
-      const { vault, riskServiceSigner } = await loadFixture(deployVaultFixture);
+      const { vault } = await loadFixture(deployVaultFixture);
       expect(await vault.depositCap()).to.equal(DEFAULT_DEPOSIT_CAP);
       expect(await vault.conservativeRateBps()).to.equal(DEFAULT_RATE_BPS);
       expect(await vault.minimumDeposit()).to.equal(DEFAULT_MIN_DEPOSIT);
       expect(await vault.earlyExitPenaltyBps()).to.equal(DEFAULT_PENALTY_BPS);
-      expect(await vault.riskServiceSigner()).to.equal(riskServiceSigner.address);
       expect(await vault.TERM_DURATION()).to.equal(365 * 24 * 60 * 60);
     });
 
     it("reverts if initial early exit penalty exceeds the 5000 bps ceiling", async function () {
-      const { usdc, safeLegManager, riskLegManager, riskServiceSigner } =
-        await loadFixture(deployVaultFixture);
+      const { usdc, safeLegManager, riskLegManager } = await loadFixture(deployVaultFixture);
       const ParallaxVault = await ethers.getContractFactory("ParallaxVault");
 
       await expect(
@@ -64,7 +61,6 @@ describe("ParallaxVault", function () {
           await usdc.getAddress(),
           await safeLegManager.getAddress(),
           await riskLegManager.getAddress(),
-          riskServiceSigner.address,
           DEFAULT_DEPOSIT_CAP,
           DEFAULT_RATE_BPS,
           DEFAULT_MIN_DEPOSIT,
@@ -74,15 +70,13 @@ describe("ParallaxVault", function () {
     });
 
     it("accepts exactly the 5000 bps ceiling", async function () {
-      const { usdc, safeLegManager, riskLegManager, riskServiceSigner } =
-        await loadFixture(deployVaultFixture);
+      const { usdc, safeLegManager, riskLegManager } = await loadFixture(deployVaultFixture);
       const ParallaxVault = await ethers.getContractFactory("ParallaxVault");
 
       const vault = await ParallaxVault.deploy(
         await usdc.getAddress(),
         await safeLegManager.getAddress(),
         await riskLegManager.getAddress(),
-        riskServiceSigner.address,
         DEFAULT_DEPOSIT_CAP,
         DEFAULT_RATE_BPS,
         DEFAULT_MIN_DEPOSIT,
@@ -450,21 +444,6 @@ describe("ParallaxVault", function () {
       await expect(
         vault.connect(alice).setMinimumDeposit(usdcAmount(50))
       ).to.be.revertedWithCustomError(vault, "OwnableUnauthorizedAccount");
-    });
-
-    it("only owner can set risk service signer", async function () {
-      const { vault, alice, bob } = await loadFixture(deployVaultFixture);
-      await expect(
-        vault.connect(alice).setRiskServiceSigner(bob.address)
-      ).to.be.revertedWithCustomError(vault, "OwnableUnauthorizedAccount");
-    });
-
-    it("owner can update risk service signer (EOA -> new EOA, simulating a future Safe swap)", async function () {
-      const { vault, owner, riskServiceSigner, bob } = await loadFixture(deployVaultFixture);
-      await expect(vault.connect(owner).setRiskServiceSigner(bob.address))
-        .to.emit(vault, "RiskServiceSignerUpdated")
-        .withArgs(riskServiceSigner.address, bob.address);
-      expect(await vault.riskServiceSigner()).to.equal(bob.address);
     });
 
     it("only owner can set early exit penalty", async function () {

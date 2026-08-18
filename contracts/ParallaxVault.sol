@@ -7,8 +7,6 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-import {AllocationSigning} from "./libraries/AllocationSigning.sol";
-import {HardBounds} from "./libraries/HardBounds.sol";
 import {ISafeLegManager} from "./interfaces/ISafeLegManager.sol";
 import {IRiskLegManager} from "./interfaces/IRiskLegManager.sol";
 
@@ -26,7 +24,14 @@ import {IRiskLegManager} from "./interfaces/IRiskLegManager.sol";
 ///      Security posture per §12 checklist: no admin withdrawal function exists
 ///      anywhere in this contract — Pausable is the only emergency control,
 ///      disclosed as a safety rail, not a fund-access mechanism.
-contract ParallaxVault is Ownable, Pausable, ReentrancyGuard, AllocationSigning {
+///
+///      ARCHITECTURE NOTE: risk-service signer state (riskServiceSigner,
+///      allocationNonce) and the EIP-712 AllocationSigning inheritance were
+///      moved OUT of this contract and into RiskLegManager, since that is the
+///      contract that owns the asset whitelist, asset classes, and previous-
+///      allocation state needed for signature verification and §9.8 hard-
+///      bounds checks. This vault has no signing-related state at all.
+contract ParallaxVault is Ownable, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     // ---------------------------------------------------------------------
@@ -48,11 +53,7 @@ contract ParallaxVault is Ownable, Pausable, ReentrancyGuard, AllocationSigning 
     // ---------------------------------------------------------------------
 
     /// @dev §13: single 365-day term, non-transferable, so a note is identified
-    ///      by an incrementing ID and owner mapping — not an ERC-721. Making it
-    ///      an NFT now and simply not exposing transfer functions would be
-    ///      misleading (§13 explicitly scopes transferability as post-MVP,
-    ///      and an inert ERC-721 invites someone to "helpfully" wire up
-    ///      transferFrom later without re-reading why it was withheld).
+    ///      by an incrementing ID and owner mapping — not an ERC-721.
     struct Note {
         address owner;
         uint256 principal;      // original USDC deposit, §9.1
@@ -67,6 +68,7 @@ contract ParallaxVault is Ownable, Pausable, ReentrancyGuard, AllocationSigning 
     // Immutables / constants
     // ---------------------------------------------------------------------
 
+    /// @dev §13: "Single 365-day term only" — MVP scope, not a shortcut.
     uint256 public constant TERM_DURATION = 365 days;
 
     IERC20 public immutable usdc;
@@ -87,9 +89,9 @@ contract ParallaxVault is Ownable, Pausable, ReentrancyGuard, AllocationSigning 
     uint256 private _nextNoteId;
     mapping(uint256 => Note) private _notes;
 
-    address public riskServiceSigner;
-    uint256 public allocationNonce;
-
+    /// @dev §9.7 MVP default: "simple, disclosed penalty-based pricing (not yet
+    ///      formula-specified)." Penalty applies ONLY to the risk-leg payout,
+    ///      never the safe leg — see redeemEarly() for the full rationale.
     uint256 public earlyExitPenaltyBps;
     uint256 private constant MAX_EARLY_EXIT_PENALTY_BPS = 5_000;
 
@@ -108,7 +110,6 @@ contract ParallaxVault is Ownable, Pausable, ReentrancyGuard, AllocationSigning 
     event DepositCapUpdated(uint256 oldCap, uint256 newCap);
     event ConservativeRateUpdated(uint256 oldRateBps, uint256 newRateBps);
     event MinimumDepositUpdated(uint256 oldMinimum, uint256 newMinimum);
-    event RiskServiceSignerUpdated(address indexed oldSigner, address indexed newSigner);
 
     event NoteRedeemed(
         uint256 indexed noteId,
@@ -128,19 +129,14 @@ contract ParallaxVault is Ownable, Pausable, ReentrancyGuard, AllocationSigning 
         address usdcAddress,
         address safeLegManagerAddress,
         address riskLegManagerAddress,
-        address initialRiskServiceSigner,
         uint256 initialDepositCap,
         uint256 initialConservativeRateBps,
         uint256 initialMinimumDeposit,
         uint256 initialEarlyExitPenaltyBps
-    )
-        Ownable(msg.sender)
-        AllocationSigning("ParallaxVault", "1")
-    {
+    ) Ownable(msg.sender) {
         usdc = IERC20(usdcAddress);
         safeLegManager = ISafeLegManager(safeLegManagerAddress);
         riskLegManager = IRiskLegManager(riskLegManagerAddress);
-        riskServiceSigner = initialRiskServiceSigner;
         depositCap = initialDepositCap;
         conservativeRateBps = initialConservativeRateBps;
         minimumDeposit = initialMinimumDeposit;
@@ -194,6 +190,8 @@ contract ParallaxVault is Ownable, Pausable, ReentrancyGuard, AllocationSigning 
         emit NoteIssued(noteId, msg.sender, principal, safeLegAmount, riskLegAmount, maturesAt);
     }
 
+    /// @dev §9.1 formula collapsed for t=1 (365-day MVP term, §13). See
+    ///      historical design note: NOT a general-t implementation.
     function _computeSafeLeg(uint256 principal)
         internal
         view
@@ -232,11 +230,11 @@ contract ParallaxVault is Ownable, Pausable, ReentrancyGuard, AllocationSigning 
     /// @dev §7 step 7. PENALTY SCOPE (explicit decision): applies ONLY to the
     ///      risk-leg payout, never to the safe leg — the safe leg's
     ///      Aave-accrued value up to the moment of exit is paid out in full,
-    ///      unpenalized. See prior design discussion: a penalty clawing back
-    ///      accrued safe-leg yield would be inconsistent with ever calling it
-    ///      "guaranteed." §10.10's forfeiture requirement is still satisfied —
-    ///      the safe leg pays its CURRENT accrued value, not the full
-    ///      `principal`, since maturity hasn't been reached.
+    ///      unpenalized. A penalty clawing back accrued safe-leg yield would
+    ///      be inconsistent with ever calling it "guaranteed." §10.10's
+    ///      forfeiture requirement is still satisfied — the safe leg pays its
+    ///      CURRENT accrued value, not the full `principal`, since maturity
+    ///      hasn't been reached.
     function redeemEarly(uint256 noteId) external nonReentrant returns (uint256 totalPayout) {
         Note storage note = _notes[noteId];
         if (note.owner == address(0)) revert NoteNotFound(noteId);
@@ -292,11 +290,6 @@ contract ParallaxVault is Ownable, Pausable, ReentrancyGuard, AllocationSigning 
     function setMinimumDeposit(uint256 newMinimum) external onlyOwner {
         emit MinimumDepositUpdated(minimumDeposit, newMinimum);
         minimumDeposit = newMinimum;
-    }
-
-    function setRiskServiceSigner(address newSigner) external onlyOwner {
-        emit RiskServiceSignerUpdated(riskServiceSigner, newSigner);
-        riskServiceSigner = newSigner;
     }
 
     function pause() external onlyOwner {
