@@ -50,6 +50,11 @@ import {HardBounds} from "./libraries/HardBounds.sol";
 ///      gap that a signer-supplied classification flag would have left open
 ///      (a compromised signer could otherwise mislabel a re-risk as a
 ///      de-risk to skip the confirmation delay entirely).
+///      BOOTSTRAP EXEMPTION: on the contract's first-ever allocation (no
+///      recorded previous allocation), both the max-delta check and the
+///      de-risk/re-risk classification are skipped — there is no prior
+///      position to measure a direction or delta against. This is
+///      initialization, not a risk adjustment, and executes immediately.
 ///
 ///      CALENDAR-DAY APPROXIMATION: §9.6 specifies "5 trading days." This
 ///      contract uses 5 * 24 hours (calendar days) as an explicit, disclosed
@@ -235,20 +240,42 @@ contract RiskLegManager is IRiskLegManager, Ownable, AllocationSigning {
 
         HardBounds.checkWeightsSumToOne(allocation.weights);
 
+        // §9.8's max-delta bound is defined relative to "the previous
+        // allocation" — on the vault's very first-ever submission, no
+        // previous allocation exists, so there is nothing for the 20pp cap
+        // to meaningfully constrain against. Skip it ONLY in this bootstrap
+        // case; every subsequent submission (including one introducing a
+        // brand-new asset never seen before) is checked normally, since a
+        // 0-to-X jump for a newly-added asset in an otherwise-established
+        // portfolio IS exactly the kind of concentration risk the cap exists
+        // to prevent.
+        bool isBootstrap = _currentAllocation.assets.length == 0;
+
         for (uint256 i = 0; i < allocation.assets.length; i++) {
             address asset = allocation.assets[i];
             HardBounds.checkWhitelisted(asset, assetWhitelisted);
             HardBounds.checkConcentrationCap(asset, allocation.weights[i]);
 
-            uint256 previousWeight = _weightOf(asset);
-            HardBounds.checkMaxDelta(asset, previousWeight, allocation.weights[i]);
+            if (!isBootstrap) {
+                uint256 previousWeight = _weightOf(asset);
+                HardBounds.checkMaxDelta(asset, previousWeight, allocation.weights[i]);
+            }
         }
 
-        // Nonce is consumed on every submission that passes verification and
-        // bounds, whether it executes immediately or only records/advances
-        // the re-risk confirmation state — prevents replay of the exact same
-        // signed message regardless of outcome.
         allocationNonce++;
+
+        if (isBootstrap) {
+            // First-ever allocation: initialization, not a risk adjustment.
+            // No prior position exists to classify a direction against, so
+            // this executes immediately regardless of what it contains
+            // (subject to the bounds already checked above).
+            if (pendingReRiskSignal.exists) {
+                emit ReRiskSignalCleared();
+                delete pendingReRiskSignal;
+            }
+            _executeAllocation(allocation.assets, allocation.weights, false);
+            return;
+        }
 
         uint256 currentCryptoBps = _sumClassWeight(
             _currentAllocation.assets,
@@ -267,7 +294,6 @@ contract RiskLegManager is IRiskLegManager, Ownable, AllocationSigning {
             return;
         }
 
-        // Re-risk path — §9.6 confirmation delay.
         if (!pendingReRiskSignal.exists) {
             pendingReRiskSignal = PendingSignal({exists: true, firstSeenAt: block.timestamp});
             emit ReRiskSignalRecorded(block.timestamp);
@@ -275,16 +301,10 @@ contract RiskLegManager is IRiskLegManager, Ownable, AllocationSigning {
         }
 
         if (block.timestamp - pendingReRiskSignal.firstSeenAt >= RERISK_CONFIRMATION_DELAY) {
-            // Execute with FRESH target (this submission's weights), per
-            // §9.6's explicit instruction, not the stale weights from the
-            // day the signal was first recorded.
             delete pendingReRiskSignal;
             _executeAllocation(allocation.assets, allocation.weights, true);
             return;
         }
-
-        // Signal persists but hasn't reached 5 days yet — continue waiting,
-        // no state change beyond the nonce consumption already applied above.
     }
 
     function _executeAllocation(
