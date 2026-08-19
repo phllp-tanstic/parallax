@@ -41,7 +41,7 @@ assets:
     #     deployment yet; not a red flag, but re-verify before mainnet since
     #     a wrapper that's never shown divergence from 1.0 is a weaker
     #     confirmation than one with proven accrual, cf. wSPYx below)
-    contract_address: "0xc3fdbe3a68ee5de461d30415a8165cf9aefe1171
+    contract_address: "0xc3fdbe3a68ee5de461d30415a8165cf9aefe1171"
 
   - ticker: wSPYx
     class: equity

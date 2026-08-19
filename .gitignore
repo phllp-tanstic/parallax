@@ -13,6 +13,13 @@ venv/
 .env
 .env.local
 
+# Deployment config — holds environment-specific addresses (USDC, Aave pool,
+# Uniswap router, Chainlink aggregators, riskServiceSigner). All public on-chain
+# data rather than secrets, but kept local so a real deploy target is never
+# committed by accident. The TEMPLATE (scripts/deploy.config.example.js) IS
+# committed and is the documented shape.
+scripts/deploy.config.js
+
 # Solidity / Hardhat build output
 artifacts/
 cache/
