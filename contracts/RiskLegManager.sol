@@ -4,6 +4,7 @@ pragma solidity 0.8.24;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import {IRiskLegManager} from "./interfaces/IRiskLegManager.sol";
 import {AllocationSigning} from "./libraries/AllocationSigning.sol";
@@ -83,7 +84,7 @@ import {OracleConsumer} from "./OracleConsumer.sol";
 ///      weekends/holidays across mixed equity + always-on crypto markets is
 ///      unspecified anywhere in the litepaper and out of scope. Flagged
 ///      here rather than silently treated as equivalent.
-contract RiskLegManager is IRiskLegManager, Ownable, AllocationSigning {
+contract RiskLegManager is IRiskLegManager, Ownable, AllocationSigning, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     uint256 private constant RERISK_CONFIRMATION_DELAY = 5 days; // calendar-day
@@ -407,10 +408,27 @@ contract RiskLegManager is IRiskLegManager, Ownable, AllocationSigning {
     ///      lives entirely in signature verification against
     ///      riskServiceSigner plus the hard bounds, not in who calls this.
     ///      This is the standard pattern for signed-order/meta-tx submission.
+    ///
+    ///      REENTRANCY: guarded per §12's "reentrancy guards on all
+    ///      external-call-adjacent functions." This function became
+    ///      external-call-adjacent when swap execution landed — it now hands
+    ///      control to the Uniswap router and, through it, to arbitrary ERC20
+    ///      token code, in the middle of a multi-step rebalance. The window
+    ///      that opens without a guard is concrete rather than theoretical:
+    ///      the sell and buy passes read `balanceOf` and re-derive targets
+    ///      between swaps, so a token or router callback re-entering here
+    ///      would submit the next nonce against half-rebalanced balances,
+    ///      with the outer call's remaining passes then executing against
+    ///      state the inner call already moved. The §9.8 bounds would each
+    ///      still pass in isolation while the combined effect breached them.
+    ///      Being permissionless is what makes the guard necessary rather
+    ///      than merely prudent: an attacker does not need the signer's
+    ///      cooperation to be the caller, only a valid signed allocation,
+    ///      which is public once submitted.
     function submitRebalanceTarget(
         SignedAllocation calldata allocation,
         bytes calldata signature
-    ) external {
+    ) external nonReentrant {
         HardBounds.checkArrayLengthsMatch(allocation.assets.length, allocation.weights.length);
         HardBounds.checkNotExpired(allocation.expiry);
         HardBounds.checkNonce(allocationNonce, allocation.nonce);
@@ -440,6 +458,41 @@ contract RiskLegManager is IRiskLegManager, Ownable, AllocationSigning {
                 uint256 previousWeight = _weightOf(asset);
                 HardBounds.checkMaxDelta(asset, previousWeight, allocation.weights[i]);
             }
+        }
+
+        // §9.8's max-delta bound applied to assets the new allocation OMITS.
+        //
+        // The loop above only sees assets NAMED in the submission, which left a
+        // hole: omitting an asset drops its weight to zero implicitly, and an
+        // implicit drop was never delta-checked. Verified before fixing, not
+        // assumed — a baseline holding btc at 4000 bps could be replaced by an
+        // allocation that simply left btc out, moving it 40pp (double the cap)
+        // in one submission and fully liquidating the position, with no revert.
+        //
+        // §9.8 states the bound over "any asset's weight," not "any submitted
+        // asset's weight," so omission was never exempt by the spec — the
+        // exemption was an artifact of iterating only the incoming array. This
+        // makes omission behave identically to an explicit 0-bps submission,
+        // which the loop above already bounded correctly. It closes an
+        // inconsistency rather than adding a restriction: the same portfolio
+        // change was already blocked when written one way and allowed when
+        // written another.
+        //
+        // CONSEQUENCE, stated because it is a real behavior change: a position
+        // above 20% can no longer be exited in a single submission by any route.
+        // It must be wound down across submissions (e.g. 6000 -> 4000 -> 2000 ->
+        // omitted), each of which independently satisfies every bound. That is
+        // exactly the constraint §9.8 already imposed on every other weight
+        // change, and the §9.6 confirmation delay does not apply here since
+        // reducing exposure classifies as a de-risk.
+        //
+        // Naturally a no-op on bootstrap: `_currentAllocation.assets` is empty,
+        // so there is no prior weight to measure against.
+        for (uint256 i = 0; i < _currentAllocation.assets.length; i++) {
+            address heldAsset = _currentAllocation.assets[i];
+            if (_containsAsset(allocation.assets, heldAsset)) continue;
+
+            HardBounds.checkMaxDelta(heldAsset, _currentAllocation.weightsBps[i], 0);
         }
 
         allocationNonce++;
@@ -813,6 +866,19 @@ contract RiskLegManager is IRiskLegManager, Ownable, AllocationSigning {
             if (targetAssets[i] == asset) return targetWeightsBps[i];
         }
         return 0;
+    }
+
+    /// @dev Membership test, deliberately separate from `_targetWeightOf`.
+    ///      That function cannot answer this question: it returns 0 both for an
+    ///      asset the allocation omits and for one it explicitly submits at 0
+    ///      bps. The §9.8 omission check needs to tell those apart, since the
+    ///      explicit-0 case is already bounded by the main loop and re-checking
+    ///      it would be redundant.
+    function _containsAsset(address[] calldata assets, address asset) private pure returns (bool) {
+        for (uint256 i = 0; i < assets.length; i++) {
+            if (assets[i] == asset) return true;
+        }
+        return false;
     }
 
     function _weightOf(address asset) internal view returns (uint256) {

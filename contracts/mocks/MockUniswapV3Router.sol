@@ -100,9 +100,16 @@ contract MockUniswapV3Router is IUniswapV3Router {
         return (amountIn * rateNumerator[tokenIn][tokenOut]) / denominator;
     }
 
+    /// @dev `public virtual` rather than `external`: MaliciousUniswapV3Router
+    ///      overrides this to attempt reentrancy and then delegates to it via
+    ///      `super`, and `super` is an internal call, which Solidity forbids on
+    ///      `external` functions. A `public` implementation still satisfies the
+    ///      interface's `external` declaration, so nothing changes for external
+    ///      callers.
     function exactInputSingle(ExactInputSingleParams calldata params)
-        external
+        public
         payable
+        virtual
         override
         returns (uint256 amountOut)
     {

@@ -308,6 +308,103 @@ describe("RiskLegManager — rebalance decision layer (§9.3/§9.5/§9.6/§9.8)"
 
       await expect(manager.submitRebalanceTarget(second, signature)).to.not.be.reverted;
     });
+
+    // -----------------------------------------------------------------------
+    // §9.8 max-delta applied to OMITTED assets.
+    //
+    // Omitting an asset drops its weight to zero implicitly. Before this was
+    // bounded, the same portfolio change was rejected when written as an
+    // explicit low weight and accepted when written as an omission — §9.8
+    // bounds "any asset's weight," so the omission route was never exempt.
+    // -----------------------------------------------------------------------
+
+    it("rejects an allocation that OMITS an asset previously above 20%, instead of letting it drop to zero unchecked", async function () {
+      const { manager, riskServiceSigner, btc, nvda, spy, domain, types } = await loadFixture(deployFixture);
+
+      // Baseline puts btc at 40% — twice what the cap permits to move at once.
+      const first = { assets: [btc, nvda, spy], weights: [4000n, 3000n, 3000n], nonce: 0n, expiry: await futureExpiry() };
+      await manager.submitRebalanceTarget(first, await signAllocation(riskServiceSigner, domain, types, first));
+
+      // btc is simply absent from the new array — never named, never assigned a
+      // weight. nvda and spy each move exactly 20pp, so they sit on the boundary
+      // and pass, leaving btc's implicit 4000 -> 0 as the only violation.
+      const second = { assets: [nvda, spy], weights: [5000n, 5000n], nonce: 1n, expiry: await futureExpiry() };
+
+      await expect(
+        manager.submitRebalanceTarget(second, await signAllocation(riskServiceSigner, domain, types, second))
+      )
+        .to.be.revertedWithCustomError(manager, "MaxDeltaExceeded")
+        // Args pinned deliberately: they prove it was BTC's omission that
+        // failed, at a previous weight of 4000 against a new weight of 0 — not
+        // an incidental nvda/spy boundary failure that would make this test pass
+        // for the wrong reason.
+        .withArgs(btc, 4000n, 0n);
+
+      // Rejected outright: the previous allocation still stands, per §9.8's
+      // "contract holds last valid allocation."
+      const [assets, weights] = await manager.getCurrentAllocation();
+      expect(assets).to.deep.equal([btc, nvda, spy]);
+      expect(weights).to.deep.equal([4000n, 3000n, 3000n]);
+    });
+
+    it("allows an omitted asset at exactly 20% to exit to zero — the fix does not block legitimate small-position exits", async function () {
+      const { manager, riskServiceSigner, btc, nvda, spy, domain, types } = await loadFixture(deployFixture);
+
+      // btc at exactly 20%: omitting it is a 20pp move, on the boundary, so it
+      // must be permitted. This is the overcorrection guard — a fix that simply
+      // forbade omission would fail here.
+      const first = { assets: [btc, nvda, spy], weights: [2000n, 4000n, 4000n], nonce: 0n, expiry: await futureExpiry() };
+      await manager.submitRebalanceTarget(first, await signAllocation(riskServiceSigner, domain, types, first));
+
+      const second = { assets: [nvda, spy], weights: [5000n, 5000n], nonce: 1n, expiry: await futureExpiry() };
+      await expect(
+        manager.submitRebalanceTarget(second, await signAllocation(riskServiceSigner, domain, types, second))
+      )
+        .to.emit(manager, "RebalanceExecuted")
+        .withArgs([nvda, spy], [5000n, 5000n], false);
+
+      const [assets] = await manager.getCurrentAllocation();
+      expect(assets).to.deep.equal([nvda, spy]);
+      expect(assets).to.not.include(btc);
+    });
+
+    it("rejects an omitted asset one bps past the boundary, confirming the cap is exactly 20pp on this path too", async function () {
+      const { manager, riskServiceSigner, btc, nvda, spy, domain, types } = await loadFixture(deployFixture);
+
+      // btc at 2001 bps — 20.01pp from zero. Paired with the test above, this
+      // pins the boundary rather than merely showing that some large drop fails.
+      const first = { assets: [btc, nvda, spy], weights: [2001n, 3999n, 4000n], nonce: 0n, expiry: await futureExpiry() };
+      await manager.submitRebalanceTarget(first, await signAllocation(riskServiceSigner, domain, types, first));
+
+      const second = { assets: [nvda, spy], weights: [5000n, 5000n], nonce: 1n, expiry: await futureExpiry() };
+      await expect(
+        manager.submitRebalanceTarget(second, await signAllocation(riskServiceSigner, domain, types, second))
+      )
+        .to.be.revertedWithCustomError(manager, "MaxDeltaExceeded")
+        .withArgs(btc, 2001n, 0n);
+    });
+
+    it("permits a >20% position to be wound down to zero across successive submissions", async function () {
+      const { manager, riskServiceSigner, btc, nvda, spy, domain, types } = await loadFixture(deployFixture);
+
+      // The documented consequence of the fix: exiting a large position is not
+      // forbidden, only staged. Each step independently satisfies every bound.
+      const first = { assets: [btc, nvda, spy], weights: [4000n, 3000n, 3000n], nonce: 0n, expiry: await futureExpiry() };
+      await manager.submitRebalanceTarget(first, await signAllocation(riskServiceSigner, domain, types, first));
+
+      // Step 1: 4000 -> 2000 explicitly (20pp, boundary).
+      const step1 = { assets: [btc, nvda, spy], weights: [2000n, 4000n, 4000n], nonce: 1n, expiry: await futureExpiry() };
+      await manager.submitRebalanceTarget(step1, await signAllocation(riskServiceSigner, domain, types, step1));
+
+      // Step 2: now at 2000, omission is a legal 20pp move.
+      const step2 = { assets: [nvda, spy], weights: [5000n, 5000n], nonce: 2n, expiry: await futureExpiry() };
+      await expect(
+        manager.submitRebalanceTarget(step2, await signAllocation(riskServiceSigner, domain, types, step2))
+      ).to.emit(manager, "RebalanceExecuted");
+
+      const [assets] = await manager.getCurrentAllocation();
+      expect(assets).to.deep.equal([nvda, spy]);
+    });
   });
 
   describe("De-risk / re-risk classification", function () {
@@ -1041,6 +1138,165 @@ describe("RiskLegManager — rebalance decision layer (§9.3/§9.5/§9.6/§9.8)"
       expect(await manager.getRiskLegValue(0)).to.equal(usdcAmount(100_000));
       expect(await manager.getRiskLegValue(1)).to.equal(usdcAmount(100_000));
       expect(await manager.totalPoolValue()).to.equal(usdcAmount(200_000));
+    });
+  });
+
+  describe("Reentrancy (§10.6 adversarial, §12 reentrancy guards)", function () {
+    // Own fixture: `swapRouter` is immutable, so proving the guard requires a
+    // RiskLegManager constructed around the malicious router from the start.
+    async function deployAttackFixture() {
+      const [owner, riskServiceSigner, , vaultSigner] = await ethers.getSigners();
+
+      const MockERC20 = await ethers.getContractFactory("MockERC20");
+      const usdc = await MockERC20.deploy("USD Coin", "USDC", USDC_DECIMALS);
+      const usdcAddress = await usdc.getAddress();
+
+      const MaliciousUniswapV3Router = await ethers.getContractFactory("MaliciousUniswapV3Router");
+      const swapRouter = await MaliciousUniswapV3Router.deploy();
+      const routerAddress = await swapRouter.getAddress();
+
+      const OracleConsumer = await ethers.getContractFactory("OracleConsumer");
+      const oracle = await OracleConsumer.deploy();
+
+      const RiskLegManager = await ethers.getContractFactory("RiskLegManager");
+      const manager = await RiskLegManager.deploy(usdcAddress, routerAddress, await oracle.getAddress());
+
+      await manager.connect(owner).setVault(vaultSigner.address);
+      await manager.connect(owner).setRiskServiceSigner(riskServiceSigner.address);
+
+      const MockChainlinkAggregator = await ethers.getContractFactory("MockChainlinkAggregator");
+      const now = (await ethers.provider.getBlock("latest")).timestamp;
+      const addresses = {};
+
+      for (const spec of ASSETS) {
+        const token = await MockERC20.deploy(spec.name, spec.symbol, spec.decimals);
+        const address = await token.getAddress();
+
+        const aggregator = await MockChainlinkAggregator.deploy(FEED_DECIMALS);
+        await oracle.connect(owner).configureFeed(address, await aggregator.getAddress(), MAX_STALENESS);
+        await aggregator.setLatestAnswer(ethers.parseUnits(spec.price.toString(), FEED_DECIMALS), now);
+
+        await manager.connect(owner).configureAsset(address, true, spec.class);
+        await manager.connect(owner).configureAssetSwapMetadata(address, spec.decimals, spec.feeTier);
+        await setFairRates(swapRouter, usdcAddress, address, spec.decimals, spec.price);
+        await token.mint(routerAddress, ethers.parseUnits("1000000", spec.decimals));
+
+        addresses[spec.key] = address;
+      }
+
+      await usdc.mint(routerAddress, usdcAmount(100_000_000));
+      await usdc.mint(vaultSigner.address, usdcAmount(10_000_000));
+      await usdc.connect(vaultSigner).approve(await manager.getAddress(), ethers.MaxUint256);
+
+      const chainId = (await ethers.provider.getNetwork()).chainId;
+      const domain = {
+        name: CONTRACT_NAME,
+        version: CONTRACT_VERSION,
+        chainId,
+        verifyingContract: await manager.getAddress(),
+      };
+      const types = {
+        SignedAllocation: [
+          { name: "assets", type: "address[]" },
+          { name: "weights", type: "uint256[]" },
+          { name: "nonce", type: "uint256" },
+          { name: "expiry", type: "uint256" },
+        ],
+      };
+
+      return {
+        manager, usdc, swapRouter, oracle, owner, riskServiceSigner, vaultSigner,
+        btc: addresses.btc, nvda: addresses.nvda, spy: addresses.spy, domain, types,
+      };
+    }
+
+    it("reverts with ReentrancyGuardReentrantCall when a router callback reenters submitRebalanceTarget mid-rebalance", async function () {
+      const { manager, usdc, swapRouter, riskServiceSigner, vaultSigner, btc, nvda, spy, domain, types } =
+        await loadFixture(deployAttackFixture);
+
+      await depositToPool(manager, vaultSigner, 0, usdcAmount(100_000));
+
+      // The reentrant payload: a genuinely valid second allocation, signed by
+      // the same riskServiceSigner the contract trusts, at nonce 1 — the value
+      // `allocationNonce` actually holds at the moment of reentry, because the
+      // outer call increments it BEFORE it swaps. Every §9.8 bound is satisfied:
+      // weights sum to 10000, none exceeds the 6000 concentration cap, all three
+      // assets are whitelisted with swap metadata, and the expiry is in the
+      // future. Nothing about this payload would fail on its own merits — only
+      // the guard stands in its way. The control at the end of this test is what
+      // holds that claim honest.
+      const reentrant = {
+        assets: [btc, nvda, spy],
+        weights: [3000n, 6000n, 1000n],
+        nonce: 1n,
+        expiry: await futureExpiry(),
+      };
+      const reentrantSignature = await signAllocation(riskServiceSigner, domain, types, reentrant);
+
+      await swapRouter.armAttack(
+        await manager.getAddress(),
+        reentrant.assets,
+        reentrant.weights,
+        reentrant.nonce,
+        reentrant.expiry,
+        reentrantSignature
+      );
+
+      // Outer allocation. Executing it drives the buy pass into the router,
+      // which attempts the reentrant submission before returning.
+      const outer = { assets: [btc, nvda], weights: [4000n, 6000n], nonce: 0n, expiry: await futureExpiry() };
+
+      await expect(
+        manager.submitRebalanceTarget(outer, await signAllocation(riskServiceSigner, domain, types, outer))
+      ).to.be.revertedWithCustomError(manager, "ReentrancyGuardReentrantCall");
+
+      // The revert is itself proof the callback fired: with no reentrancy
+      // attempt this rebalance succeeds (see the control below), so a revert can
+      // only mean the router was reached and called back. And the error is one
+      // ONLY OZ's ReentrancyGuard raises, which places the rejection inside the
+      // guarded function rather than at some earlier, unrelated failure.
+      //
+      // Nothing was deployed and the nonce never advanced — the whole
+      // transaction unwound, per §9.8's "holds last valid allocation."
+      expect(await usdc.balanceOf(await manager.getAddress())).to.equal(usdcAmount(100_000));
+      expect(await manager.allocationNonce()).to.equal(0n);
+      const [assets] = await manager.getCurrentAllocation();
+      expect(assets).to.deep.equal([]);
+
+      // CONTROL — proves the rejection above was caused by reentrancy and not by
+      // a defective payload. Same router, attack stood down: the outer
+      // allocation now executes, and the identical armed allocation, resubmitted
+      // through the normal path at the same nonce with the same signature, is
+      // accepted. If that payload were malformed, expired, or mis-signed, this
+      // would fail here and the test above would have been proving nothing.
+      await swapRouter.disarmAttack();
+
+      await manager.submitRebalanceTarget(outer, await signAllocation(riskServiceSigner, domain, types, outer));
+      expect(await manager.allocationNonce()).to.equal(1n);
+
+      const armed = await swapRouter.armedAllocation();
+      await expect(
+        manager.submitRebalanceTarget(
+          {
+            // Spread into plain arrays: ethers returns a frozen Result proxy
+            // here, and the ABI encoder mutates array args in place while
+            // resolving them.
+            assets: [...armed.assets],
+            weights: [...armed.weights],
+            nonce: armed.nonce,
+            expiry: armed.expiry,
+          },
+          armed.signature
+        )
+      ).to.emit(manager, "RebalanceExecuted");
+      expect(await manager.allocationNonce()).to.equal(2n);
+
+      // NOT asserted here: the router's `attackAttempted` flag. It is set
+      // immediately before the reentrant call, so the revert rolls it back
+      // along with everything else — it reads false afterward no matter what
+      // happened, and asserting on it either way would be meaningless. The
+      // revert carrying ReentrancyGuardReentrantCall is the observable proof
+      // that the callback fired and was rejected inside the guard.
     });
   });
 });
