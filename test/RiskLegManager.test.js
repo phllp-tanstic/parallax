@@ -6,22 +6,57 @@ describe("RiskLegManager", function () {
   const USDC_DECIMALS = 6;
   const usdcAmount = (n) => ethers.parseUnits(n.toString(), USDC_DECIMALS);
 
+  // These share-accounting tests deliberately never populate an allocation, so
+  // _totalPoolValue() reduces to the idle USDC balance and no oracle or router
+  // call is reachable. The router/oracle are wired only because the constructor
+  // now requires them; swap-execution behavior is covered in
+  // RiskLegManager.rebalance.test.js, where the pool actually holds assets.
+  async function deployManager(usdcAddress) {
+    const MockUniswapV3Router = await ethers.getContractFactory("MockUniswapV3Router");
+    const swapRouter = await MockUniswapV3Router.deploy();
+
+    const OracleConsumer = await ethers.getContractFactory("OracleConsumer");
+    const oracle = await OracleConsumer.deploy();
+
+    const RiskLegManager = await ethers.getContractFactory("RiskLegManager");
+    const manager = await RiskLegManager.deploy(
+      usdcAddress,
+      await swapRouter.getAddress(),
+      await oracle.getAddress()
+    );
+
+    return { manager, swapRouter, oracle };
+  }
+
   async function deployFixture() {
     const [owner, vaultSigner, otherVault] = await ethers.getSigners();
 
     const MockERC20 = await ethers.getContractFactory("MockERC20");
     const usdc = await MockERC20.deploy("USD Coin", "USDC", USDC_DECIMALS);
 
-    const RiskLegManager = await ethers.getContractFactory("RiskLegManager");
-    const manager = await RiskLegManager.deploy(await usdc.getAddress());
+    const { manager, swapRouter, oracle } = await deployManager(await usdc.getAddress());
 
     await manager.connect(owner).setVault(vaultSigner.address);
 
     await usdc.mint(vaultSigner.address, usdcAmount(1_000_000));
     await usdc.connect(vaultSigner).approve(await manager.getAddress(), ethers.MaxUint256);
 
-    return { manager, usdc, owner, vaultSigner, otherVault };
+    return { manager, usdc, swapRouter, oracle, owner, vaultSigner, otherVault };
   }
+
+  // -------------------------------------------------------------------------
+  // Deployment wiring
+  // -------------------------------------------------------------------------
+
+  describe("Deployment", function () {
+    it("records the USDC, router, and oracle addresses passed to the constructor", async function () {
+      const { manager, usdc, swapRouter, oracle } = await loadFixture(deployFixture);
+
+      expect(await manager.usdc()).to.equal(await usdc.getAddress());
+      expect(await manager.swapRouter()).to.equal(await swapRouter.getAddress());
+      expect(await manager.oracleConsumer()).to.equal(await oracle.getAddress());
+    });
+  });
 
   // -------------------------------------------------------------------------
   // setVault — same one-time-wiring pattern as SafeLegManager
@@ -31,8 +66,7 @@ describe("RiskLegManager", function () {
     it("only owner can set the vault", async function () {
       const MockERC20 = await ethers.getContractFactory("MockERC20");
       const usdc = await MockERC20.deploy("USD Coin", "USDC", USDC_DECIMALS);
-      const RiskLegManager = await ethers.getContractFactory("RiskLegManager");
-      const fresh = await RiskLegManager.deploy(await usdc.getAddress());
+      const { manager: fresh } = await deployManager(await usdc.getAddress());
 
       const [, vaultSigner, otherVault] = await ethers.getSigners();
       await expect(fresh.connect(otherVault).setVault(vaultSigner.address)).to.be.revertedWithCustomError(
